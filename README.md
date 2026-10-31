@@ -7,8 +7,9 @@ routable IPv6 addresses from the router's existing LAN prefix, using
 IPv6 forwarding plus NDP proxying on the Docker host. No NAT for IPv6.
 
 This setup now works for outbound, host-to-container, and LAN-to-container.
-A static NDP proxy entry plus `ndppd` are in place; port publishing is
-required to open Docker's `ip6tables` firewall even in routed mode.
+A static NDP proxy entry plus `ndppd` are in place; all IPv6 to/from
+the Docker subnet is allowed via persisted `DOCKER-USER` rules, so no
+port publishing is needed.
 
 ## Network details
 
@@ -89,8 +90,52 @@ inbound traffic to allow. Without it, `ip6tables` `DOCKER` chain is:
 That is why LAN `ping6` worked while LAN `curl` to port 80 timed out.
 Publishing the port adds the needed TCP ACCEPT.
 
-The test container publishes `8080:80` on the host side; direct access to
-the container's global IPv6 address on port 80 is unaffected.
+The final approach instead allows all IPv6 to/from the Docker subnet via
+`DOCKER-USER` (see below), so containers need no `-p` mappings at all for
+IPv6. Direct access to a container's global address works on any port.
+
+## Firewall: allow all IPv6 to the Docker network (persistent)
+
+`DOCKER-USER` is checked before Docker's `DOCKER` chain DROP, so one pair
+of subnet rules (stable across network recreates, unlike bridge names)
+opens the whole subnet with zero host port bindings:
+
+`/usr/local/sbin/docker-ipv6-firewall.sh`:
+
+``` sh
+#!/bin/sh
+ip6tables -C DOCKER-USER -d 2406:6d00:b4f8:eb00:1::/80 -j ACCEPT 2>/dev/null || \
+ip6tables -I DOCKER-USER -d 2406:6d00:b4f8:eb00:1::/80 -j ACCEPT
+
+ip6tables -C DOCKER-USER -s 2406:6d00:b4f8:eb00:1::/80 -j ACCEPT 2>/dev/null || \
+ip6tables -I DOCKER-USER -s 2406:6d00:b4f8:eb00:1::/80 -j ACCEPT
+```
+
+`/etc/systemd/system/docker-ipv6-firewall.service` (enabled):
+
+``` text
+[Unit]
+Description=Restore custom Docker IPv6 firewall rules
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/docker-ipv6-firewall.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Verified live:
+
+``` text
+Chain DOCKER-USER (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 ACCEPT     0    --  *      *       2406:6d00:b4f8:eb00:1::/80  ::/0
+    0     0 ACCEPT     0    --  *      *       ::/0                 2406:6d00:b4f8:eb00:1::/80
+```
 
 ## NDP proxying with ndppd
 
@@ -126,18 +171,23 @@ ip -6 neigh show proxy
 in `auto` mode (it answers in userspace). The static entry is not
 persistent; after a reboot, verify LAN reachability with `ndppd` alone.
 
-## Test web container
+## Test web container (removed after validation)
+
+During testing this served a static page (`IPv6 test OK`) on `:::80`
+(`nginx` listens on IPv6 by default). Both test containers (`ipv6-web`
+at `...:1::100`, `ipv6-allports` at `...:1::101`) and the pulled images
+(`nginx:alpine`, `busybox`, `curlimages/curl`) were removed afterwards;
+no test containers remain. To recreate without any published ports (the
+firewall rules above already allow everything):
 
 ``` bash
 docker run -d --name ipv6-web --network docker-ipv6 \
   --ip6 2406:6d00:b4f8:eb00:1::100 \
-  -p 8080:80 \
-  -v /tmp/opencode/ipv6-web/index.html:/usr/share/nginx/html/index.html:ro \
   nginx:alpine
 ```
 
-Serves a static page (`IPv6 test OK`) on `:::80`. `nginx` listens on
-IPv6 by default.
+Omit `--ip6` for an auto-assigned address; Docker IPAM assigns the next
+free `...:1::/80` address with default via `...:1::ffff`.
 
 ## Checks completed
 
@@ -153,8 +203,10 @@ All from the final `...:1::/80` + routed network:
   Host returns a different `...:51bc:...` address. NAT is off.
 * Host-to-container `curl -6 'http://[...:1::100]/'`: ok.
 * LAN-to-container `ping -6 ...:1::100` from Windows: ok.
-* LAN-to-container `curl -6 http://[...:1::100]/` from Windows: ok
-  (after publishing the port; before that it timed out with `curl: (28)`).
+* LAN-to-container `curl -6 http://[...:1::100]/` from Windows: ok.
+  Final validation was with zero published ports, via the `DOCKER-USER`
+  subnet rules (earlier it timed out with `curl: (28)` before the firewall
+  was opened).
 * Host default route: `default via fe80::642:1aff:fe7c:6c00 dev end1 proto ra`.
 * Router-advertised LAN route: `2406:6d00:b4f8:eb00::/64 dev end1 proto ra`.
 
@@ -164,9 +216,10 @@ All from the final `...:1::/80` + routed network:
   neighbor solicitations on the LAN for container addresses and forwards
   to the Docker bridge. Each container still needs a valid address and
   route.
-* In Docker's `gateway_mode_ipv6=routed`, IPv6 is not NATed, but the
-  published port (`-p`) is still the firewall switch. No `-p` means
-  `DOCKER ... -j DROP` for TCP even though the address is routable.
+* In Docker's `gateway_mode_ipv6=routed`, IPv6 is not NATed, but
+  `ip6tables` still drops forwarded TCP by default. Either publish ports
+  (`-p`) per container or, as done here, ACCEPT the whole subnet in
+  `DOCKER-USER` (persisted via systemd) and skip `-p` entirely.
 * ICMP working while TCP times out is the signature of this firewall
   drop, not an ND problem.
 * Avoid the router's own low addresses when carving a `/80` out of the
