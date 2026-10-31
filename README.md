@@ -23,8 +23,6 @@ required to open Docker's `ip6tables` firewall even in routed mode.
   Docker bridge interface                `br-d649a3a4a92b`
   Docker IPv6 subnet                     `2406:6d00:b4f8:eb00:1::/80`
   Docker bridge IPv6 gateway             `2406:6d00:b4f8:eb00:1::ffff`
-  Docker IPv4 subnet                     `172.19.0.0/16`
-  Docker IPv4 gateway                    `172.19.0.1`
   Test web container                     `ipv6-web` at `...:1::100`, `nginx:alpine`
 
 The router's LAN prefix length was shown in its UI as `/56`, but the
@@ -91,10 +89,8 @@ inbound traffic to allow. Without it, `ip6tables` `DOCKER` chain is:
 That is why LAN `ping6` worked while LAN `curl` to port 80 timed out.
 Publishing the port adds the needed TCP ACCEPT.
 
-Note: host `0.0.0.0:80` was already bound by another service, so the
-test container publishes `8080:80` instead of `80:80`. Direct access to
-the container's global IPv6 address on port 80 still works; only the
-host-side mapping uses 8080.
+The test container publishes `8080:80` on the host side; direct access to
+the container's global IPv6 address on port 80 is unaffected.
 
 ## NDP proxying with ndppd
 
@@ -161,29 +157,6 @@ All from the final `...:1::/80` + routed network:
   (after publishing the port; before that it timed out with `curl: (28)`).
 * Host default route: `default via fe80::642:1aff:fe7c:6c00 dev end1 proto ra`.
 * Router-advertised LAN route: `2406:6d00:b4f8:eb00::/64 dev end1 proto ra`.
-
-## Existing Docker networks left alone
-
-The `opencode-sandbox_default` network was not changed. The standard
-`bridge`, `host`, and `none` networks were also left alone, except that
-other containers on the host publish unrelated ports (`4096`, `8000`).
-
-## Not done yet
-
-* No persistent sysctl configuration (`/etc/sysctl.d/`).
-* Static `ip -6 neigh add proxy` entry is not persistent; confirm
-  `ndppd` alone suffices after reboot, then drop the static entry if so.
-* Manual `DOCKER-USER` test rule (if ever added) is not persistent;
-  prefer `-p` publishing, which Docker manages.
-* No automatic mechanism beyond `ndppd auto` + static IPs has been
-  configured for future containers. Either assign `--ip6` explicitly or
-  confirm `ndppd auto` covers dynamically assigned addresses.
-* Confirm whether the ISP/router prefix is stable or can change, and
-  plan how to update the Docker subnet + `ndppd.conf` if it changes.
-* True internet (off-LAN) inbound with a fresh connection has been
-  shown for return traffic (HTTP responses reached containers), but an
-  unsolicited inbound test from a VPS / mobile data to the container
-  listener has not been recorded here.
 
 ## Key lessons
 
